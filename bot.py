@@ -15,12 +15,8 @@ import logging
 TELEGRAM_TOKEN = "7238748055:AAHbVcV0lXL-odepWAb2QE6PB1Mi9g6eT1w"
 OPENROUTER_API_KEY = "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"
 
-# === ИНИЦИАЛИЗАЦИЯ ===
-bot = Bot(token=TELEGRAM_TOKEN)
-dp = Dispatcher()
-
-model = None  # Будет инициализирован в main()
-
+# === Глобальные переменные ===
+model = None
 DB_PATH = "stats.db"
 user_histories = {}
 user_settings = {}  # user_id -> dict: model, history_depth, style
@@ -111,152 +107,21 @@ async def ask_gpt(prompt, user_id):
         logging.error(f"GPT connection error: {e}")
         return "⚠️ Ошибка соединения с GPT."
 
-@dp.message(Command(commands=["start"]))
-async def start_handler(message: types.Message):
-    await message.answer("Привет! Отправь мне текст или голосовое сообщение, я отвечу через GPT.")
+async def main():
+    global model
 
-@dp.message(Command(commands=["settings"]))
-async def settings_handler(message: types.Message):
-    uid = message.from_user.id
-    settings = user_settings.get(uid, {
-        "model": "anthropic/claude-3-haiku",
-        "history_depth": 2,
-        "style": "default"
-    })
+    # Создаём и устанавливаем event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🧠 Модель", callback_data="set_model"),
-            InlineKeyboardButton(text="🔁 История", callback_data="set_history"),
-            InlineKeyboardButton(text="✍️ Стиль", callback_data="set_style"),
-        ]
-    ])
-    text = (
-        f"⚙️ Текущие настройки:\n"
-        f"Модель: `{settings['model']}`\n"
-        f"Глубина истории: `{settings['history_depth']}`\n"
-        f"Тип ответа: `{settings['style']}`"
-    )
-    await message.answer(text, reply_markup=kb, parse_mode="Markdown")
+    # Инициализация бота и диспетчера внутри main
+    bot = Bot(token=TELEGRAM_TOKEN)
+    dp = Dispatcher()
 
-@dp.callback_query(lambda c: c.data == "repeat")
-async def repeat_handler(callback: types.CallbackQuery):
-    await callback.answer()
-    await bot.send_message(callback.from_user.id, "✍️ Введи вопрос:")
+    # Загружаем модель Whisper
+    model = whisper.load_model("base")
 
-@dp.callback_query(lambda c: c.data.startswith("set_"))
-async def settings_callback(callback: types.CallbackQuery):
-    uid = callback.from_user.id
-    user_settings.setdefault(uid, {
-        "model": "anthropic/claude-3-haiku",
-        "history_depth": 2,
-        "style": "default"
-    })
-
-    action = callback.data
-    if action == "set_model":
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Claude-3-Haiku", callback_data="model_claude")],
-            [InlineKeyboardButton(text="GPT-4", callback_data="model_gpt")],
-            [InlineKeyboardButton(text="Mistral", callback_data="model_mistral")]
-        ])
-        await callback.message.answer("Выберите модель:", reply_markup=kb)
-    elif action == "set_history":
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="2", callback_data="hist_2"),
-             InlineKeyboardButton(text="5", callback_data="hist_5"),
-             InlineKeyboardButton(text="10", callback_data="hist_10")]
-        ])
-        await callback.message.answer("Выберите глубину истории:", reply_markup=kb)
-    elif action == "set_style":
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="По умолчанию", callback_data="style_default")],
-            [InlineKeyboardButton(text="Кратко", callback_data="style_short")],
-            [InlineKeyboardButton(text="Развернуто", callback_data="style_detailed")]
-        ])
-        await callback.message.answer("Выберите стиль ответа:", reply_markup=kb)
-    await callback.answer()
-
-@dp.callback_query(lambda c: c.data.startswith(("model_", "hist_", "style_")))
-async def apply_setting(callback: types.CallbackQuery):
-    uid = callback.from_user.id
-    settings = user_settings.setdefault(uid, {
-        "model": "anthropic/claude-3-haiku",
-        "history_depth": 2,
-        "style": "default"
-    })
-
-    data = callback.data
-    if data.startswith("model_"):
-        model = data.split("_", 1)[1]
-        model_map = {
-            "claude": "anthropic/claude-3-haiku",
-            "gpt": "openai/gpt-4",
-            "mistral": "mistralai/mistral-7b-instruct"
-        }
-        settings["model"] = model_map.get(model, settings["model"])
-        await callback.message.answer(f"✅ Модель установлена: `{settings['model']}`", parse_mode="Markdown")
-    elif data.startswith("hist_"):
-        settings["history_depth"] = int(data.split("_")[1])
-        await callback.message.answer(f"✅ Глубина истории установлена: `{settings['history_depth']}`", parse_mode="Markdown")
-    elif data.startswith("style_"):
-        settings["style"] = data.split("_")[1]
-        await callback.message.answer(f"✅ Стиль ответа установлен: `{settings['style']}`", parse_mode="Markdown")
-
-    await callback.answer()
-
-@dp.message(lambda message: message.text is not None)
-async def text_handler(message: types.Message):
-    uid = message.from_user.id
-    name = message.from_user.username or "без_имени"
-    log_message(uid, name, message.text)
-    await update_stats(uid, name)
-
-    if is_spamming(uid):
-        await message.reply("⏳ Подожди немного...")
-        return
-
-    await message.answer("💭 Думаю...")
-    reply = await ask_gpt(message.text, uid)
-    await message.reply(reply, reply_markup=get_reply_button())
-
-@dp.message(lambda message: message.content_type == "voice")
-async def voice_handler(message: types.Message):
-    uid = message.from_user.id
-    name = message.from_user.username or "без_имени"
-    file_id = message.voice.file_id
-    file = await bot.get_file(file_id)
-    voice_path = f"voice_{uid}.ogg"
-    await bot.download_file(file.file_path, voice_path)
-
-    await update_stats(uid, name)
-    if is_spamming(uid):
-        await message.reply("⏳ Подожди немного...")
-        try:
-            os.remove(voice_path)
-        except Exception:
-            pass
-        return
-
-    await message.answer("🔊 Распознаю голос...")
-    try:
-        result = model.transcribe(voice_path)
-        os.remove(voice_path)
-        recognized_text = result['text']
-        log_message(uid, name, f"[voice] {recognized_text}")
-        await message.answer(f"📝 Ты сказал: {recognized_text}")
-        await message.answer("💭 Думаю...")
-        reply = await ask_gpt(recognized_text, uid)
-        await message.reply(reply, reply_markup=get_reply_button())
-    except Exception as e:
-        logging.error(f"Whisper error: {e}")
-        await message.answer("⚠️ Не удалось распознать речь.")
-        try:
-            os.remove(voice_path)
-        except Exception:
-            pass
-
-async def init_db():
+    # Инициализируем базу данных
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -268,10 +133,152 @@ async def init_db():
         """)
         await db.commit()
 
-async def main():
-    global model
-    await init_db()
-    model = whisper.load_model("base")  # Загружаем модель здесь, внутри main
+    # === Регистрируем хэндлеры ===
+    @dp.message(Command(commands=["start"]))
+    async def start_handler(message: types.Message):
+        await message.answer("Привет! Отправь мне текст или голосовое сообщение, я отвечу через GPT.")
+
+    @dp.message(Command(commands=["settings"]))
+    async def settings_handler(message: types.Message):
+        uid = message.from_user.id
+        settings = user_settings.get(uid, {
+            "model": "anthropic/claude-3-haiku",
+            "history_depth": 2,
+            "style": "default"
+        })
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🧠 Модель", callback_data="set_model"),
+                InlineKeyboardButton(text="🔁 История", callback_data="set_history"),
+                InlineKeyboardButton(text="✍️ Стиль", callback_data="set_style"),
+            ]
+        ])
+        text = (
+            f"⚙️ Текущие настройки:\n"
+            f"Модель: `{settings['model']}`\n"
+            f"Глубина истории: `{settings['history_depth']}`\n"
+            f"Тип ответа: `{settings['style']}`"
+        )
+        await message.answer(text, reply_markup=kb, parse_mode="Markdown")
+
+    @dp.callback_query(lambda c: c.data == "repeat")
+    async def repeat_handler(callback: types.CallbackQuery):
+        await callback.answer()
+        await bot.send_message(callback.from_user.id, "✍️ Введи вопрос:")
+
+    @dp.callback_query(lambda c: c.data.startswith("set_"))
+    async def settings_callback(callback: types.CallbackQuery):
+        uid = callback.from_user.id
+        user_settings.setdefault(uid, {
+            "model": "anthropic/claude-3-haiku",
+            "history_depth": 2,
+            "style": "default"
+        })
+
+        action = callback.data
+        if action == "set_model":
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Claude-3-Haiku", callback_data="model_claude")],
+                [InlineKeyboardButton(text="GPT-4", callback_data="model_gpt")],
+                [InlineKeyboardButton(text="Mistral", callback_data="model_mistral")]
+            ])
+            await callback.message.answer("Выберите модель:", reply_markup=kb)
+        elif action == "set_history":
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="2", callback_data="hist_2"),
+                 InlineKeyboardButton(text="5", callback_data="hist_5"),
+                 InlineKeyboardButton(text="10", callback_data="hist_10")]
+            ])
+            await callback.message.answer("Выберите глубину истории:", reply_markup=kb)
+        elif action == "set_style":
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="По умолчанию", callback_data="style_default")],
+                [InlineKeyboardButton(text="Кратко", callback_data="style_short")],
+                [InlineKeyboardButton(text="Развернуто", callback_data="style_detailed")]
+            ])
+            await callback.message.answer("Выберите стиль ответа:", reply_markup=kb)
+        await callback.answer()
+
+    @dp.callback_query(lambda c: c.data.startswith(("model_", "hist_", "style_")))
+    async def apply_setting(callback: types.CallbackQuery):
+        uid = callback.from_user.id
+        settings = user_settings.setdefault(uid, {
+            "model": "anthropic/claude-3-haiku",
+            "history_depth": 2,
+            "style": "default"
+        })
+
+        data = callback.data
+        if data.startswith("model_"):
+            model_key = data.split("_", 1)[1]
+            model_map = {
+                "claude": "anthropic/claude-3-haiku",
+                "gpt": "openai/gpt-4",
+                "mistral": "mistralai/mistral-7b-instruct"
+            }
+            settings["model"] = model_map.get(model_key, settings["model"])
+            await callback.message.answer(f"✅ Модель установлена: `{settings['model']}`", parse_mode="Markdown")
+        elif data.startswith("hist_"):
+            settings["history_depth"] = int(data.split("_")[1])
+            await callback.message.answer(f"✅ Глубина истории установлена: `{settings['history_depth']}`", parse_mode="Markdown")
+        elif data.startswith("style_"):
+            settings["style"] = data.split("_")[1]
+            await callback.message.answer(f"✅ Стиль ответа установлен: `{settings['style']}`", parse_mode="Markdown")
+
+        await callback.answer()
+
+    @dp.message(lambda message: message.text is not None)
+    async def text_handler(message: types.Message):
+        uid = message.from_user.id
+        name = message.from_user.username or "без_имени"
+        log_message(uid, name, message.text)
+        await update_stats(uid, name)
+
+        if is_spamming(uid):
+            await message.reply("⏳ Подожди немного...")
+            return
+
+        await message.answer("💭 Думаю...")
+        reply = await ask_gpt(message.text, uid)
+        await message.reply(reply, reply_markup=get_reply_button())
+
+    @dp.message(lambda message: message.content_type == "voice")
+    async def voice_handler(message: types.Message):
+        uid = message.from_user.id
+        name = message.from_user.username or "без_имени"
+        file_id = message.voice.file_id
+        file = await bot.get_file(file_id)
+        voice_path = f"voice_{uid}.ogg"
+        await bot.download_file(file.file_path, voice_path)
+
+        await update_stats(uid, name)
+        if is_spamming(uid):
+            await message.reply("⏳ Подожди немного...")
+            try:
+                os.remove(voice_path)
+            except Exception:
+                pass
+            return
+
+        await message.answer("🔊 Распознаю голос...")
+        try:
+            result = model.transcribe(voice_path)
+            os.remove(voice_path)
+            recognized_text = result['text']
+            log_message(uid, name, f"[voice] {recognized_text}")
+            await message.answer(f"📝 Ты сказал: {recognized_text}")
+            await message.answer("💭 Думаю...")
+            reply = await ask_gpt(recognized_text, uid)
+            await message.reply(reply, reply_markup=get_reply_button())
+        except Exception as e:
+            logging.error(f"Whisper error: {e}")
+            await message.answer("⚠️ Не удалось распознать речь.")
+            try:
+                os.remove(voice_path)
+            except Exception:
+                pass
+
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
