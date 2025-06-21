@@ -1,0 +1,6 @@
+aiogram==2.25.2
+aiohttp
+aiosqlite
+aiofiles
+openai-whisper
+torch
