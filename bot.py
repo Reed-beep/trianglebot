@@ -19,7 +19,8 @@ OPENROUTER_API_KEY = "sk-or-v1-ab69cc723ca511db0b04f0ab4951d4d274974561703445f55
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-model = whisper.load_model("base")
+model = None  # Будет инициализирован в main()
+
 DB_PATH = "stats.db"
 user_histories = {}
 user_settings = {}  # user_id -> dict: model, history_depth, style
@@ -268,7 +269,9 @@ async def init_db():
         await db.commit()
 
 async def main():
+    global model
     await init_db()
+    model = whisper.load_model("base")  # Загружаем модель здесь, внутри main
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
